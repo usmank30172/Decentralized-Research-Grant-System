@@ -190,3 +190,111 @@
   (match (map-get? proposals { proposal-id: proposal-id })
     proposal (get status proposal)
     "not-found"))
+
+(define-map proposal-milestones
+  { proposal-id: uint }
+  { 
+    total-milestones: uint,
+    completed-milestones: uint,
+    milestone-funding: uint
+  })
+
+(define-map milestones
+  { proposal-id: uint, milestone-id: uint }
+  {
+    description: (string-ascii 200),
+    funding-percentage: uint,
+    status: (string-ascii 20),
+    approvals: uint,
+    required-approvals: uint
+  })
+
+(define-map milestone-approvals
+  { proposal-id: uint, milestone-id: uint, reviewer: principal }
+  { approved: bool })
+
+(define-public (create-milestones (proposal-id uint) (milestone-descriptions (list 5 (string-ascii 200))) (funding-percentages (list 5 uint)))
+  (let ((proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+        (milestone-count (len milestone-descriptions)))
+    (asserts! (is-eq (get researcher proposal) tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (fold + funding-percentages u0) u100) ERR_INVALID_AMOUNT)
+    (asserts! (is-eq (get status proposal) "approved") ERR_PROPOSAL_NOT_APPROVED)
+    (map-set proposal-milestones
+      { proposal-id: proposal-id }
+      {
+        total-milestones: milestone-count,
+        completed-milestones: u0,
+        milestone-funding: (get funding-amount proposal)
+      })
+    (fold create-single-milestone 
+          (zip milestone-descriptions funding-percentages)
+          { proposal-id: proposal-id, counter: u0 })
+    (ok milestone-count)))
+
+(define-private (create-single-milestone (milestone-data { description: (string-ascii 200), percentage: uint }) (acc { proposal-id: uint, counter: uint }))
+  (let ((milestone-id (+ (get counter acc) u1)))
+    (map-set milestones
+      { proposal-id: (get proposal-id acc), milestone-id: milestone-id }
+      {
+        description: (get description milestone-data),
+        funding-percentage: (get percentage milestone-data),
+        status: "pending",
+        approvals: u0,
+        required-approvals: u3
+      })
+    { proposal-id: (get proposal-id acc), counter: milestone-id }))
+
+(define-private (zip (list-a (list 5 (string-ascii 200))) (list-b (list 5 uint)))
+  (map combine-elements list-a list-b))
+
+(define-private (combine-elements (a (string-ascii 200)) (b uint))
+  { description: a, percentage: b })
+
+(define-public (approve-milestone (proposal-id uint) (milestone-id uint))
+  (let ((milestone (unwrap! (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id }) ERR_PROPOSAL_NOT_FOUND))
+        (reviewer-info (unwrap! (map-get? reviewer-status { reviewer: tx-sender }) ERR_NOT_AUTHORIZED)))
+    (asserts! (get is-reviewer reviewer-info) ERR_NOT_AUTHORIZED)
+    (asserts! (is-none (map-get? milestone-approvals { proposal-id: proposal-id, milestone-id: milestone-id, reviewer: tx-sender })) ERR_ALREADY_VOTED)
+    (map-set milestone-approvals
+      { proposal-id: proposal-id, milestone-id: milestone-id, reviewer: tx-sender }
+      { approved: true })
+    (let ((new-approvals (+ (get approvals milestone) u1)))
+      (map-set milestones
+        { proposal-id: proposal-id, milestone-id: milestone-id }
+        (merge milestone { approvals: new-approvals }))
+      (if (>= new-approvals (get required-approvals milestone))
+        (complete-milestone proposal-id milestone-id)
+        (ok true)))))
+
+(define-private (complete-milestone (proposal-id uint) (milestone-id uint))
+  (let ((milestone (unwrap-panic (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id })))
+        (proposal-milestones-info (unwrap-panic (map-get? proposal-milestones { proposal-id: proposal-id }))))
+    (map-set milestones
+      { proposal-id: proposal-id, milestone-id: milestone-id }
+      (merge milestone { status: "completed" }))
+    (map-set proposal-milestones
+      { proposal-id: proposal-id }
+      (merge proposal-milestones-info 
+        { completed-milestones: (+ (get completed-milestones proposal-milestones-info) u1) }))
+    (ok true)))
+
+(define-public (claim-milestone-funding (proposal-id uint) (milestone-id uint))
+  (let ((proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+        (milestone (unwrap! (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id }) ERR_PROPOSAL_NOT_FOUND))
+        (proposal-milestones-info (unwrap! (map-get? proposal-milestones { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND)))
+    (asserts! (is-eq (get researcher proposal) tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status milestone) "completed") ERR_PROPOSAL_NOT_APPROVED)
+    (let ((funding-amount (/ (* (get milestone-funding proposal-milestones-info) (get funding-percentage milestone)) u100)))
+      (asserts! (>= (var-get total-treasury) funding-amount) ERR_INSUFFICIENT_FUNDS)
+      (try! (as-contract (stx-transfer? funding-amount tx-sender (get researcher proposal))))
+      (var-set total-treasury (- (var-get total-treasury) funding-amount))
+      (map-set milestones
+        { proposal-id: proposal-id, milestone-id: milestone-id }
+        (merge milestone { status: "funded" }))
+      (ok funding-amount))))
+
+(define-read-only (get-milestone (proposal-id uint) (milestone-id uint))
+  (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id }))
+
+(define-read-only (get-proposal-milestones (proposal-id uint))
+  (map-get? proposal-milestones { proposal-id: proposal-id }))
