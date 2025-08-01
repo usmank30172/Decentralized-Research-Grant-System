@@ -298,3 +298,77 @@
 
 (define-read-only (get-proposal-milestones (proposal-id uint))
   (map-get? proposal-milestones { proposal-id: proposal-id }))
+
+(define-map research-teams
+  { team-id: uint }
+  {
+    lead-researcher: principal,
+    team-name: (string-ascii 50),
+    members: (list 5 principal),
+    total-reputation: uint,
+    active: bool
+  })
+
+(define-map team-memberships
+  { researcher: principal, team-id: uint }
+  { role: (string-ascii 20), contribution-weight: uint })
+
+(define-data-var team-counter uint u0)
+
+(define-public (create-research-team (team-name (string-ascii 50)) (members (list 4 principal)))
+  (let ((team-id (+ (var-get team-counter) u1))
+        (researcher-rep (get reputation (default-to { reputation: u0, total-grants: u0, active-proposals: u0 }
+                                       (map-get? researchers { researcher: tx-sender })))))
+    (asserts! (>= researcher-rep u15) ERR_NOT_AUTHORIZED)
+    (map-set research-teams
+      { team-id: team-id }
+      {
+        lead-researcher: tx-sender,
+        team-name: team-name,
+        members: (unwrap! (as-max-len? (append members tx-sender) u5) ERR_INVALID_AMOUNT),
+        total-reputation: researcher-rep,
+        active: true
+      })
+    (map-set team-memberships
+      { researcher: tx-sender, team-id: team-id }
+      { role: "lead", contribution-weight: u40 })
+    (fold register-team-member members { team-id: team-id, weight: u15 })
+    (var-set team-counter team-id)
+    (ok team-id)))
+
+(define-private (register-team-member (member principal) (data { team-id: uint, weight: uint }))
+  (let ((member-rep (get reputation (default-to { reputation: u0, total-grants: u0, active-proposals: u0 }
+                                   (map-get? researchers { researcher: member })))))
+    (map-set team-memberships
+      { researcher: member, team-id: (get team-id data) }
+      { role: "member", contribution-weight: (get weight data) })
+    data))
+
+(define-public (submit-team-proposal (team-id uint) (title (string-ascii 100)) (description (string-ascii 500)) (funding-amount uint))
+  (let ((team (unwrap! (map-get? research-teams { team-id: team-id }) ERR_PROPOSAL_NOT_FOUND))
+        (proposal-id (+ (var-get proposal-counter) u1))
+        (membership (map-get? team-memberships { researcher: tx-sender, team-id: team-id })))
+    (asserts! (and (is-some membership) (get active team)) ERR_NOT_AUTHORIZED)
+    (asserts! (>= (get total-reputation team) u30) ERR_NOT_AUTHORIZED)
+    (asserts! (and (> funding-amount u0) (<= funding-amount (var-get total-treasury))) ERR_INVALID_AMOUNT)
+    (map-set proposals
+      { proposal-id: proposal-id }
+      {
+        researcher: (get lead-researcher team),
+        title: title,
+        description: description,
+        funding-amount: funding-amount,
+        votes-for: u0,
+        votes-against: u0,
+        voting-end-block: (+ stacks-block-height u144),
+        status: "pending",
+        funded: false
+      })
+    (var-set proposal-counter proposal-id)
+    (ok proposal-id)))
+
+(define-read-only (get-research-team (team-id uint))
+  (map-get? research-teams { team-id: team-id }))
+
+(define-read-only (get-team-membership (researcher principal) (team-id uint))
+  (map-get? team-memberships { researcher: researcher, team-id: team-id }))
