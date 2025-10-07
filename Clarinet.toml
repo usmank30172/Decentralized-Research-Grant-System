@@ -13,6 +13,10 @@ epoch = 3.1
 path = 'contracts/Research-Proposal-Dispute.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.Research-Proposal-Delegation]
+path = 'contracts/Research-Proposal-Delegation.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
